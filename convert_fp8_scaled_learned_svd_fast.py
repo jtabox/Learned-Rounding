@@ -10,15 +10,26 @@ import gc
 # Written by Clybius
 
 # Keys containing these strings will not be quantized if a given argument is set
-AVOID_KEY_NAMES = ["norm", "bias", "embed_tokens", "shared"] #T5XXL, may need to be changed for other TEs.
-T5XXL_REMOVE_KEY_NAMES = ["decoder", "lm_head"] # ComfyUI doesn't need decoder tensors or other extraneous tensors that may exist in a full T5XXL.
+AVOID_KEY_NAMES = [
+    "norm",
+    "bias",
+    "embed_tokens",
+    "shared",
+]  # T5XXL, may need to be changed for other TEs.
+T5XXL_REMOVE_KEY_NAMES = [
+    "decoder",
+    "lm_head",
+]  # ComfyUI doesn't need decoder tensors or other extraneous tensors that may exist in a full T5XXL.
 DISTILL_LAYER_KEYNAMES = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in"]
 # Target FP8 format
 TARGET_FP8_DTYPE = torch.float8_e4m3fn
 # Intermediate dtype for calculations
-COMPUTE_DTYPE = torch.float32 # Don't think more hurts here since we're working tensor by tensor.
+COMPUTE_DTYPE = (
+    torch.float32
+)  # Don't think more hurts here since we're working tensor by tensor.
 # Dtype for storing scale factors
 SCALE_DTYPE = torch.float32
+
 
 class LearnedRoundingConverter:
     """
@@ -26,15 +37,18 @@ class LearnedRoundingConverter:
     Inspired by AdaRound paper (https://arxiv.org/abs/2004.10568).
     "TPEC-Quant" (Top-Principal Error Correction Quantization)
     """
+
     def __init__(self, num_iter=256, top_k=1):
         self.num_iter = num_iter
         self.top_k = top_k
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         # The maximum representable value for e4m3fn, used for scaling.
         self.f8_max_val = torch.finfo(TARGET_FP8_DTYPE).max
         print(f"LearnedRoundingConverter initialized on device: {self.device}")
 
-    def convert(self, W_orig: torch.Tensor, X_calib: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def convert(
+        self, W_orig: torch.Tensor, X_calib: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Performs the learned rounding conversion for a single weight tensor.
         """
@@ -46,55 +60,70 @@ class LearnedRoundingConverter:
             print("  - Tensor is all zeros, skipping optimization.")
             scale = torch.tensor(1.0, device=self.device)
             quantized_tensor = torch.zeros_like(W_float32, dtype=TARGET_FP8_DTYPE)
-            return quantized_tensor.cpu(), scale.reciprocal().cpu().reshape(1), torch.zeros_like(W_float32).cpu()
+            return (
+                quantized_tensor.cpu(),
+                scale.reciprocal().cpu().reshape(1),
+                torch.zeros_like(W_float32).cpu(),
+            )
 
-        scale = self.f8_max_val / w_max # Example: (absmax = 1, fp8 max = +-448 for dtype e4m3_fn)
-        W_scaled = W_float32 * scale # absmax now +-448
+        scale = (
+            self.f8_max_val / w_max
+        )  # Example: (absmax = 1, fp8 max = +-448 for dtype e4m3_fn)
+        W_scaled = W_float32 * scale  # absmax now +-448
 
         # Step 2: Initialize the rounding mask 'h'
-        W_rounded = W_scaled.to(TARGET_FP8_DTYPE).to(COMPUTE_DTYPE) # Naive RtN quantization on scaled model
-        #W_dq_rounded = W_rounded / scale # Scale back down with scalar
+        W_rounded = W_scaled.to(TARGET_FP8_DTYPE).to(
+            COMPUTE_DTYPE
+        )  # Naive RtN quantization on scaled model
+        # W_dq_rounded = W_rounded / scale # Scale back down with scalar
         k = min(self.top_k, min(W_float32.shape))
-        U, _, Vh = torch.pca_lowrank(W_float32, q=k, center=False, niter=16) # To my knowledge, LAPACK (or magma or w/e) uses 1k iters by default. Unsure if the default of 2 is good so set it to 16 here.
+        U, _, Vh = torch.pca_lowrank(
+            W_float32, q=k, center=False, niter=16
+        )  # To my knowledge, LAPACK (or magma or w/e) uses 1k iters by default. Unsure if the default of 2 is good so set it to 16 here.
         Vh = Vh.T
-        U_k = U[:, :k] # Obtain most important low-rank matrices
+        U_k = U[:, :k]  # Obtain most important low-rank matrices
         Vh_k = Vh[:k, :]
 
-        W_q_refined = W_rounded.clone() # Clone, as this tensor will be the one thats iteratively refined
+        W_q_refined = (
+            W_rounded.clone()
+        )  # Clone, as this tensor will be the one thats iteratively refined
 
         # Step 4: The optimization loop
-        best_loss = float('inf')
+        best_loss = float("inf")
         best_tensor = None
         worse_loss_counter = 0
         lr = 1.0
         curr_lr = lr
         pbar = tqdm(range(self.num_iter), desc="    Optimizing rounding", leave=False)
         for i in pbar:
-
             current_dq = W_q_refined / scale
             error = current_dq - W_float32
 
             projected_error = U_k.T @ error @ Vh_k.T
 
-            loss = torch.linalg.norm(projected_error)**2
+            loss = torch.linalg.norm(projected_error) ** 2
 
             if loss.abs() < 1e-8:
-                print(f"Loss {loss.item():.9f} is negligible. Stopping at iteration {i}.")
+                print(
+                    f"Loss {loss.item():.9f} is negligible. Stopping at iteration {i}."
+                )
                 break
-            
+
             # Simple learning rate scheduler and early stopping
             if loss.abs() >= best_loss:
                 worse_loss_counter += 1
                 curr_lr = max(curr_lr / 2, 1e-8)
-                if worse_loss_counter >= 40: # Reduce LR after 20 worse iterations
-                    print(f"Loss ({best_loss}) has only gotten worse over {worse_loss_counter} iterations, keeping best tensor and skipping...")
+                if worse_loss_counter >= 40:  # Reduce LR after 20 worse iterations
+                    print(
+                        f"Loss ({best_loss}) has only gotten worse over {worse_loss_counter} iterations, keeping best tensor and skipping..."
+                    )
                     break
             else:
                 best_loss = loss.abs().item()
                 best_tensor = W_q_refined.clone()
                 worse_loss_counter = 0
                 curr_lr = curr_lr * 2
-            
+
             grad = U_k @ projected_error @ Vh_k
 
             W_q_refined = W_q_refined - curr_lr * grad
@@ -112,20 +141,34 @@ class LearnedRoundingConverter:
         # Clean up GPU memory
         del W_float32, W_scaled, W_rounded, W_q_refined, error, U, Vh, U_k, Vh_k
         gc.collect()
-        if self.device == 'cuda':
+        if self.device == "cuda":
             torch.cuda.empty_cache()
 
-        return W_f8.cpu(), dequant_scale.cpu(), (W_f8.to(COMPUTE_DTYPE) * dequant_scale).cpu()
+        return (
+            W_f8.cpu(),
+            dequant_scale.cpu(),
+            (W_f8.to(COMPUTE_DTYPE) * dequant_scale).cpu(),
+        )
+
 
 def get_fp8_constants(fp8_dtype: torch.dtype) -> Tuple[float, float, float]:
     """Gets the min, max, and smallest positive normal value for a given FP8 dtype."""
     finfo = torch.finfo(fp8_dtype)
     return float(finfo.min), float(finfo.max), float(finfo.tiny)
 
+
 # Global FP8 constants
 FP8_MIN, FP8_MAX, FP8_MIN_POS = get_fp8_constants(TARGET_FP8_DTYPE)
 
-def convert_to_fp8_scaled(input_file: str, output_file: str, t5xxl: bool, keep_distillation: bool, calib_samples: int, **converter_kwargs):
+
+def convert_to_fp8_scaled(
+    input_file: str,
+    output_file: str,
+    t5xxl: bool,
+    keep_distillation: bool,
+    calib_samples: int,
+    **converter_kwargs,
+):
     """
     Converts a safetensors file to a version with FP8 scaled weights using learned rounding (modified from AdaRound).
     """
@@ -151,17 +194,21 @@ def convert_to_fp8_scaled(input_file: str, output_file: str, t5xxl: bool, keep_d
     print("\nScanning model for linear layer dimensions...")
     calibration_data_cache = {}
     for key, tensor in tensors.items():
-        if key.endswith('.weight') and tensor.ndim == 2:
+        if key.endswith(".weight") and tensor.ndim == 2:
             in_features = tensor.shape[1]
             if in_features not in calibration_data_cache:
-                print(f"  - Found new in_features dimension: {in_features}. Generating calibration data.")
+                print(
+                    f"  - Found new in_features dimension: {in_features}. Generating calibration data."
+                )
                 calibration_data_cache[in_features] = torch.randn(
-                    calib_samples, in_features, dtype=COMPUTE_DTYPE # Use bf16 for realistic inputs, but COMPUTE_DTYPE should work? Unsure if this even matters.
+                    calib_samples,
+                    in_features,
+                    dtype=COMPUTE_DTYPE,  # Use bf16 for realistic inputs, but COMPUTE_DTYPE should work? Unsure if this even matters.
                 )
     print("Calibration data generated.\n")
 
     new_tensors: Dict[str, torch.Tensor] = {}
-    weight_keys = sorted([key for key in tensors.keys() if key.endswith('.weight')])
+    weight_keys = sorted([key for key in tensors.keys() if key.endswith(".weight")])
     total_weights = len(weight_keys)
     skipped_count = 0
     processed_count = 0
@@ -172,21 +219,25 @@ def convert_to_fp8_scaled(input_file: str, output_file: str, t5xxl: bool, keep_d
         process_this_key = True
 
         if t5xxl and any(avoid_name in key for avoid_name in T5XXL_REMOVE_KEY_NAMES):
-            print(f"({i+1}/{total_weights}) Removing decoder T5XXL tensor: {key}")
+            print(f"({i + 1}/{total_weights}) Removing decoder T5XXL tensor: {key}")
             process_this_key = False
             skipped_count += 1
             continue
 
         if t5xxl and any(avoid_name in key for avoid_name in AVOID_KEY_NAMES):
-            print(f"({i+1}/{total_weights}) Skipping excluded T5XXL tensor: {key}")
+            print(f"({i + 1}/{total_weights}) Skipping excluded T5XXL tensor: {key}")
             new_tensors[key] = tensors[key]
             process_this_key = False
             skipped_count += 1
 
-        if keep_distillation and any(avoid_name in key for avoid_name in DISTILL_LAYER_KEYNAMES):
-            print(f"({i+1}/{total_weights}) Skipping excluded distillation tensor: {key}")
+        if keep_distillation and any(
+            avoid_name in key for avoid_name in DISTILL_LAYER_KEYNAMES
+        ):
+            print(
+                f"({i + 1}/{total_weights}) Skipping excluded distillation tensor: {key}"
+            )
             new_tensors[key] = tensors[key]
-            base_name = key[:-len('.weight')]
+            base_name = key[: -len(".weight")]
             scale_weight_key = f"{base_name}.scale_weight"
             new_tensors[scale_weight_key] = torch.tensor([1.0], dtype=SCALE_DTYPE)
             process_this_key = False
@@ -195,35 +246,39 @@ def convert_to_fp8_scaled(input_file: str, output_file: str, t5xxl: bool, keep_d
         if not process_this_key:
             continue
 
-        print(f"({i+1}/{total_weights}) Processing tensor: {key}")
+        print(f"({i + 1}/{total_weights}) Processing tensor: {key}")
         processed_count += 1
 
         original_tensor = tensors[key]
 
         if original_tensor.numel() == 0 or original_tensor.ndim != 2:
             print(f"  - Skipping empty or non-2D tensor: {key}")
-            new_tensors[key] = tensors[key].to(TARGET_FP8_DTYPE) # Store as empty FP8
-            base_name = key[:-len('.weight')]
+            new_tensors[key] = tensors[key].to(TARGET_FP8_DTYPE)  # Store as empty FP8
+            base_name = key[: -len(".weight")]
             scale_weight_key = f"{base_name}.scale_weight"
             new_tensors[scale_weight_key] = torch.tensor([1.0], dtype=SCALE_DTYPE)
             continue
 
         in_features = original_tensor.shape[1]
         if in_features not in calibration_data_cache:
-             print(f"  - WARNING: No calibration data found for in_features={in_features}. Skipping {key}")
-             new_tensors[key] = original_tensor
-             skipped_count += 1
-             processed_count -= 1
-             continue
+            print(
+                f"  - WARNING: No calibration data found for in_features={in_features}. Skipping {key}"
+            )
+            new_tensors[key] = original_tensor
+            skipped_count += 1
+            processed_count -= 1
+            continue
 
         calibration_data = calibration_data_cache[in_features]
 
         # Use the learned rounding converter
-        quantized_fp8_tensor, dequant_scale, dequantized_weight_tensor = converter.convert(original_tensor, calibration_data)
+        quantized_fp8_tensor, dequant_scale, dequantized_weight_tensor = (
+            converter.convert(original_tensor, calibration_data)
+        )
 
         # Store the results
         new_tensors[key] = quantized_fp8_tensor
-        base_name = key[:-len('.weight')]
+        base_name = key[: -len(".weight")]
         bias_key = f"{base_name}.bias"
         scale_weight_key = f"{base_name}.scale_weight"
         new_tensors[scale_weight_key] = dequant_scale.to(SCALE_DTYPE)
@@ -233,55 +288,74 @@ def convert_to_fp8_scaled(input_file: str, output_file: str, t5xxl: bool, keep_d
             print(f"  - Found and adjusting corresponding bias: {bias_key}")
             with torch.no_grad():
                 original_bias = tensors[bias_key]
-                
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
                 # Move tensors to the compute device
                 W_orig_dev = original_tensor.to(device, dtype=COMPUTE_DTYPE)
-                W_dequant_dev = dequantized_weight_tensor.to(device, dtype=COMPUTE_DTYPE)
+                W_dequant_dev = dequantized_weight_tensor.to(
+                    device, dtype=COMPUTE_DTYPE
+                )
                 X_calib_dev = calibration_data.to(device, dtype=COMPUTE_DTYPE)
                 b_orig_dev = original_bias.to(device, dtype=COMPUTE_DTYPE)
 
                 # Calculate weight error
                 weight_error = W_orig_dev - W_dequant_dev
-                
+
                 # Propagate error through the linear layer's matrix multiplication
                 # Output error: (N, C_out) = (N, C_in) @ (C_in, C_out).T
                 output_error = X_calib_dev @ weight_error.T
-                
+
                 # The bias correction is the mean of this output error across the batch dimension
                 bias_correction = output_error.mean(dim=0)
-                
+
                 # Apply the correction to the original bias
                 b_new = b_orig_dev - bias_correction
-                
+
                 # Store the new bias, converting back to original dtype and CPU
                 new_tensors[bias_key] = b_new.cpu().to(original_bias.dtype)
-                
+
                 print(f"  - Original bias mean: {original_bias.mean().item():.6f}")
-                print(f"  - New bias mean     : {new_tensors[bias_key].mean().item():.6f}")
-                
+                print(
+                    f"  - New bias mean     : {new_tensors[bias_key].mean().item():.6f}"
+                )
+
                 # Clean up GPU memory
-                del W_orig_dev, W_dequant_dev, X_calib_dev, b_orig_dev, weight_error, output_error, bias_correction, b_new
-                if device == 'cuda':
+                del (
+                    W_orig_dev,
+                    W_dequant_dev,
+                    X_calib_dev,
+                    b_orig_dev,
+                    weight_error,
+                    output_error,
+                    bias_correction,
+                    b_new,
+                )
+                if device == "cuda":
                     torch.cuda.empty_cache()
 
         if t5xxl:
             scale_input_key = f"{base_name}.scale_input"
-            new_tensors[scale_input_key] = dequant_scale.detach().clone().to(SCALE_DTYPE)
+            new_tensors[scale_input_key] = (
+                dequant_scale.detach().clone().to(SCALE_DTYPE)
+            )
 
         print(f"  - Dequant Scale  : {dequant_scale.item():.9}")
         print(f"  - Weight  : {quantized_fp8_tensor}")
 
     # Combine original non-weight tensors with new/modified ones
     for key, tensor in tensors.items():
-        if (any(avoid_name in key for avoid_name in T5XXL_REMOVE_KEY_NAMES) and t5xxl):
+        if any(avoid_name in key for avoid_name in T5XXL_REMOVE_KEY_NAMES) and t5xxl:
             print(f"(+) Skipping decoder tensor: {key}")
             continue
         if key not in new_tensors:
             new_tensors[key] = tensor
             print(f"(+) Adding original non-quantized tensor: {key}")
 
-    new_tensors["scaled_fp8"] = torch.empty((2), dtype=TARGET_FP8_DTYPE) if not t5xxl else torch.empty((0), dtype=TARGET_FP8_DTYPE)
+    new_tensors["scaled_fp8"] = (
+        torch.empty((2), dtype=TARGET_FP8_DTYPE)
+        if not t5xxl
+        else torch.empty((0), dtype=TARGET_FP8_DTYPE)
+    )
 
     print("-" * 40)
     print(f"Saving {len(new_tensors)} tensors to {output_file}")
@@ -305,17 +379,46 @@ def convert_to_fp8_scaled(input_file: str, output_file: str, t5xxl: bool, keep_d
 def main():
     parser = argparse.ArgumentParser(
         description=f"Convert safetensors weights to Scaled {TARGET_FP8_DTYPE} format using learned rounding, adapted from AdaRound.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # Original arguments
-    parser.add_argument("--input", type=str, required=True, help="Input safetensors file path.")
-    parser.add_argument("--output", type=str, help="Output safetensors file path. If not provided, generated based on input name.")
-    parser.add_argument("--keep_distillation", action='store_true', help="Exclude distillation layers from quantization. \n(Likely not helpful because ComfyUI may use Round-to-Nearest in place of this, which SUXASS.)")
-    parser.add_argument("--t5xxl", action='store_true', help="Exclude certain layers for T5XXL model compatibility.")
+    parser.add_argument(
+        "--input", type=str, required=True, help="Input safetensors file path."
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        help="Output safetensors file path. If not provided, generated based on input name.",
+    )
+    parser.add_argument(
+        "--keep_distillation",
+        action="store_true",
+        help="Exclude distillation layers from quantization. \n(Likely not helpful because ComfyUI may use Round-to-Nearest in place of this, which SUXASS.)",
+    )
+    parser.add_argument(
+        "--t5xxl",
+        action="store_true",
+        help="Exclude certain layers for T5XXL model compatibility.",
+    )
 
-    parser.add_argument("--calib_samples", type=int, default=3072, help="Number of random samples for calibration.") # Random calibration samples for bias correction
-    parser.add_argument("--num_iter", type=int, default=500, help="Number of optimization iterations per tensor.")
-    parser.add_argument("--top_k", type=int, default=1, help="Number of optimization iterations per tensor.")
+    parser.add_argument(
+        "--calib_samples",
+        type=int,
+        default=3072,
+        help="Number of random samples for calibration.",
+    )  # Random calibration samples for bias correction
+    parser.add_argument(
+        "--num_iter",
+        type=int,
+        default=500,
+        help="Number of optimization iterations per tensor.",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=1,
+        help="Number of optimization iterations per tensor.",
+    )
 
     args = parser.parse_args()
 
@@ -327,14 +430,18 @@ def main():
     try:
         _ = torch.zeros(1, dtype=TARGET_FP8_DTYPE)
     except (RuntimeError, TypeError):
-        print("Error: This version of PyTorch or this hardware does not support torch.float8_e4m3fn.")
+        print(
+            "Error: This version of PyTorch or this hardware does not support torch.float8_e4m3fn."
+        )
         return
 
-    fp8_type_str = TARGET_FP8_DTYPE.__str__().split('.')[-1]
+    fp8_type_str = TARGET_FP8_DTYPE.__str__().split(".")[-1]
     distill_str = "_nodistill" if args.keep_distillation else ""
     if not args.output:
         base_name = os.path.splitext(args.input)[0]
-        output_file = f"{base_name}_{fp8_type_str}_scaled_learned{distill_str}_svd.safetensors"
+        output_file = (
+            f"{base_name}_{fp8_type_str}_scaled_learned{distill_str}_svd.safetensors"
+        )
     else:
         output_file = args.output
 
@@ -344,8 +451,8 @@ def main():
 
     # Pass learned rounding hyperparameters to the conversion function
     converter_kwargs = {
-        'num_iter': args.num_iter,
-        'top_k': args.top_k,
+        "num_iter": args.num_iter,
+        "top_k": args.top_k,
     }
 
     convert_to_fp8_scaled(
@@ -354,8 +461,9 @@ def main():
         args.t5xxl,
         args.keep_distillation,
         args.calib_samples,
-        **converter_kwargs
+        **converter_kwargs,
     )
+
 
 if __name__ == "__main__":
     main()
