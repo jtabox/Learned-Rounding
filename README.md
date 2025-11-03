@@ -1,10 +1,14 @@
-> Don't you hate it when you ask Copilot a question because you don't understand a single thing, and it ends with you having to fork a whole repo in order to save all the scripts and information from the rabbit hole Copilot pulled you into?
+> _Don't you just hate it when you ask Copilot a question because you don't understand a single thing, and it ends with you having to fork a whole repo in order to save all the scripts and information from the rabbit hole Copilot pulled you into?_
 
-> Me too.
+**Please note: This is an experimental repo, based on the work of [Clybius](https://github.com/Clybius) [here](https://github.com/Clybius/Learned-Rounding). They designed this... ~~thing?~~ ~~code?~~ conversion method?, so all credit goes to them. You should too if you'd rather the conversion scripts work.**
 
-# Copilot being helpful, informative and overwhelming
+---
+
+##### Copilot being helpful, informative and overwhelming:
 
 ## _What do the three versions mean?_
+
+## Copilot:
 
 ### Short answer
 
@@ -20,7 +24,7 @@
 
 - Why SVD helps: weight matrices often have a few principal directions that matter most for the layer’s output. By computing a low-rank decomposition (SVD/PCA) and projecting the error onto the top components, you get a small, accurate surrogate for the parts of the error that matter most. Optimizing with that surrogate is faster (you don’t need to treat every matrix element equally) and often more effective for FP8, where small errors can be critical.
 
-- Differences in code / hyperparameters you can tune:
+### Differences in code / hyperparameters you can tune:
 
   - "learned" scripts expose lr and reg_lambda (typical AdaRound hyperparams) and num_iter.
   - "learned_svd" simplifies some hyperparams and uses an SVD/PCA step (the repo’s variant appears to pick a top-1 component in that file).
@@ -28,11 +32,11 @@
 
 ### Which to use
 
-- If you want best speed + very good quality: use learned_svd_fast (recommended by the README).
+- If you want best speed + very good quality: use learned_svd_fast (as recommended by the README).
 - If you want to test the SVD idea or inspect behavior: learned_svd (slower/more conservative SVD settings).
 - If you want the classic AdaRound-style behavior (maybe slightly different quality characteristics): learned.
 
-## _I understood less than 10% of what you said, what do?_
+## _I literally understood less than 15% of what you said, what should I do?_
 
 Use `learned_svd_fast` — it gives the best practical quality for FP8 in this repo (best balance of fidelity and speed). `learned_svd` can match or slightly beat it if you crank SVD settings and iterations, and plain `learned` (AdaRound-style) can be useful if you want the original regularized per-weight optimization and are willing to tune lr/reg and spend more time.
 
@@ -153,7 +157,7 @@ Copy/paste and run on a machine with PyTorch and safetensors installed.
 
 Would you like the script to also output a JSON file listing tensors and recommended top_k so you can feed it into a selective conversion workflow?
 
-## _Inspection script v2? Uh, I guess, why not_
+## _Uh, I guess, why not_
 
 **[svd_inspector_with_json.py](svd_inspector_with_json.py)**
 
@@ -214,9 +218,9 @@ Save this file into the Learned-Rounding repo root, ensure you have torch and sa
 - Not only do I not guarantee anything, I haven't the slightest idea what it is I could guarantee to begin with.
 - For working scripts backed by actual science, please use the ones in the original repository, whose dev actually seems to know stuff: [Clybius/Learned-Rounding](https://github.com/Clybius/Learned-Rounding)
 
----
-
 **Original README below.**
+
+---
 
 ## Learned-Rounding
 
