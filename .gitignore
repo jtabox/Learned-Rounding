@@ -4,3 +4,5 @@ __pycache__
 /out
 *.json
 *.log
+
+_old_stuff
