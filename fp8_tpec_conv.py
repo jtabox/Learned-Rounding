@@ -1,15 +1,13 @@
 """
-fp8_tpec_conv.py
+https://github.com/jtabox/Learned-Rounding/fp8_tpec_conv.py
 
-Super FP8 Scaled Converter (TPEC-Quant learned rounding)
-- Per-layer or global auto top_k via SVD energy probe (default per-layer).
-- Smart Auto profile picks quality, top_k strategy, caps, and calibration size
-  based on model hardness and available VRAM (one-switch usage).
+FP8 Scaled Quantizer using TPEC-Quant learned rounding via SVD (check README for details).
+- Quality, top_k strategy, caps, and calibration size parameters are calculated based on model hardness and available VRAM.
+- Available quality presets, T5 auto-detection, keep-distillation option, and ComfyUI-compatible quantized models.
+- OOM resilience: automatic retry with lighter settings if CUDA runs out of memory.
+- Per-layer or global auto top_k via SVD energy probe.
 - No-grad, clamped updates inside the converter for stability and speed.
 - Bias correction with on-device calibration inputs.
-- Quality presets, richer CLI, T5 auto-detection, keep-distillation,
-  ComfyUI-compatible output.
-- OOM resilience: automatic retry with lighter settings if CUDA runs out of memory.
 
 Usage:
   python fp8_tpec_conv.py --input model.safetensors
@@ -397,7 +395,7 @@ def choose_auto_params(input_file: str, t5xxl_detected: bool) -> dict:
 # -----------------------
 # Main conversion workflow
 # -----------------------
-def convert_to_fp8_super(
+def convert_to_fp8_tpec(
     input_file: str,
     output_file: str,
     t5xxl: bool = False,
@@ -415,7 +413,7 @@ def convert_to_fp8_super(
     print(f"{'=' * 60}")
     print(f"Input:  {input_file}")
     print(f"Output: {output_file}")
-    print(f"Mode:   {'T5XXL' if t5xxl else 'Flux/Chroma'}")
+    print(f"Mode:   {'T5XXL' if t5xxl else 'Flux'}")
     print(f"{'=' * 60}\n")
 
     # Load model
@@ -772,7 +770,7 @@ Examples:
 
     # Run conversion with OOM resilience
     try:
-        convert_to_fp8_super(
+        convert_to_fp8_tpec(
             input_file=args.input,
             output_file=args.output,
             t5xxl=t5xxl_detected,
@@ -792,7 +790,7 @@ Examples:
             args.calib_samples = max(1024, calib_samples // 2)
             args.topk_max = max(1, min(args.topk_max, 2))
             auto_topk_mode = "global" if auto_topk_mode == "per-layer" else "off"
-            convert_to_fp8_super(
+            convert_to_fp8_tpec(
                 input_file=args.input,
                 output_file=args.output,
                 t5xxl=t5xxl_detected,
